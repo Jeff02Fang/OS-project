@@ -10,8 +10,7 @@ using namespace std;
 extern int NUM_CPU;
 extern int workload_factor1;
 extern int workload_factor2;
-
-mutex mutex5;
+extern mutex sched_mutex;
 
 Scheduler_O1::PriorityQueue::PriorityQueue(int min_prio, int max_prio)
     : min_prio(min_prio), max_prio(max_prio), pq(max_prio-min_prio+1), len(0)
@@ -78,9 +77,7 @@ Task* Scheduler_O1::request_task(int cpu_id, Logger &logger){
     // add more tasks into system
 
     if (cpu_rq[cpu_id].size() < workload_factor1){
-        mutex5.lock();
         read_next_n_tasks(workload_factor2, cpu_id, logger);
-        mutex5.unlock();
     }
 
 
@@ -142,7 +139,9 @@ bool Scheduler_O1::open_task_file(const string &filename){
 }
 
 void Scheduler_O1::read_next_n_tasks(int n, int cpu_id, Logger &logger){
+    sched_mutex.lock();
     if (!infile.is_open()){
+        sched_mutex.unlock();
         return;
     }
     string line;
@@ -171,4 +170,5 @@ void Scheduler_O1::read_next_n_tasks(int n, int cpu_id, Logger &logger){
     if (infile.eof()){
         infile.close();
     }
+    sched_mutex.unlock();
 }

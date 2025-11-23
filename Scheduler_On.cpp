@@ -11,33 +11,23 @@ extern int NUM_CPU;
 extern int workload_factor1;
 extern int workload_factor2;
 
-//pthread_mutex_t mutex3 = PTHREAD_MUTEX_INITIALIZER;
-//pthread_mutex_t mutex4 = PTHREAD_MUTEX_INITIALIZER;
-//pthread_mutex_t mutex_sched = PTHREAD_MUTEX_INITIALIZER;
-
-mutex mutex3, mutex4;
+mutex sched_req_mutex, sched_ret_mutex;
+extern mutex sched_mutex;
 
 Scheduler_On::Scheduler_On(string filename){
-    //this->ready_queue = taskReader(filename);
     if (!open_task_file(filename)){
         throw runtime_error("infile error");
     }
-    //read_next_n_tasks(10);
 }
 
 Task* Scheduler_On::request_task(int cpu_id, Logger &logger){
-    //pthread_mutex_lock(&mutex3);
-    mutex3.lock();
+    sched_req_mutex.lock();
     if ((int)ready_queue.size() < workload_factor1) 
         read_next_n_tasks(workload_factor2, cpu_id, logger);
-    /*
-    if ((int)ready_queue.size() < workload_factor1){ // simulate the workload
-        read_next_n_tasks(workload_factor2, cpu_id, logger);
-    }*/
+
 
     if (ready_queue.empty()){
-        //pthread_mutex_unlock(&mutex3);
-        mutex3.unlock();
+        sched_req_mutex.unlock();
         return nullptr;
     }
     pair<int, Task*> best_choice(-2000, nullptr);
@@ -50,19 +40,16 @@ Task* Scheduler_On::request_task(int cpu_id, Logger &logger){
         }
     }
     ready_queue.remove(best_choice.second);
-    //pthread_mutex_unlock(&mutex3);
-    mutex3.unlock();
 
+    sched_req_mutex.unlock();
     return best_choice.second;
 }
 
 void Scheduler_On::return_task(int cpu_id, Task *task){
     cpu_id += 1; // prevent warning
-    //pthread_mutex_lock(&mutex4);
-    mutex4.lock();
+    sched_ret_mutex.lock();
     ready_queue.push_back(task);
-    //pthread_mutex_unlock(&mutex4);
-    mutex4.unlock();
+    sched_ret_mutex.unlock();
 }
 
 int Scheduler_On::goodness(const int cpu_id, const Task *task) const {
@@ -93,9 +80,9 @@ bool Scheduler_On::open_task_file(const string &filename){
 }
 
 void Scheduler_On::read_next_n_tasks(int n, int cpu_id, Logger &logger){
-    //pthread_mutex_lock(&mutex_sched);
+    sched_mutex.lock();
     if (!infile.is_open()){
-        //pthread_mutex_unlock(&mutex_sched);
+        sched_mutex.unlock();
         return;
     }
     string line;
@@ -122,5 +109,5 @@ void Scheduler_On::read_next_n_tasks(int n, int cpu_id, Logger &logger){
     if (infile.eof()){
         infile.close();
     }
-    //pthread_mutex_unlock(&mutex_sched);
+    sched_mutex.unlock();
 }

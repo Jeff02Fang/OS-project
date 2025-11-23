@@ -25,22 +25,23 @@ queue<Task*> *tasks_return_from_io = nullptr;
 
 const int NUM_IO = 2;
 const int IO_ID_OFFSET = 4;      // device ids for IO start here (4,5,...)
-const int NUM_DEVICES = 8;       // total devices (cpus + possible ios)
+//const int NUM_DEVICES = 8;       // total devices (cpus + possible ios)
 queue<pair<int, Task*>> io_queue[NUM_IO];
 
-mutex mutexes[NUM_DEVICES];
+//mutex mutexes[NUM_DEVICES];
 mutex cerr_mutex;
-
+mutex io_mutex[NUM_IO];
+mutex ret_mutex[4];
+mutex sched_mutex;
+atomic<bool> io_running[NUM_IO];
 atomic<bool> shut_down(false);
 
 void busy_sleep_microseconds(int duration_us);
 
 // small safe print function to avoid interleaved cerr
 void safe_cerr(const string &s){
-    //pthread_mutex_lock(&cerr_mutex);
     cerr_mutex.lock();
     cerr << s << flush;
-    //pthread_mutex_unlock(&cerr_mutex);
     cerr_mutex.unlock();
 }
 
@@ -48,10 +49,7 @@ void safe_cerr(const string &s){
 void *IO_device(void *arg){
     int device_id = *((int*)arg);
     int io_id = device_id - IO_ID_OFFSET;
-    {
-        string s = "Turn on I/O_device #" + to_string(io_id) + "\n";
-        safe_cerr(s);
-    }
+    safe_cerr("Turn on I/O #" + to_string(io_id) + "\n");
     set_realtime_and_affinity(io_id+IO_ID_OFFSET, 76-io_id);
     // init Logger
     Logger logger("io" + to_string(io_id) + ".log", global_start_time);
@@ -61,14 +59,13 @@ void *IO_device(void *arg){
 
     while (true){
         // lock this device's mutex and pop a task if present
-        //pthread_mutex_lock(&mutexes[device_id]);
-        mutexes[device_id].lock();
+        io_mutex[io_id].lock();
         bool has_task = !io_queue[io_id].empty();
         if (has_task){
+            io_running[io_id].store(true);
             auto temp = io_queue[io_id].front();
             io_queue[io_id].pop();
-            //pthread_mutex_unlock(&mutexes[device_id]);
-            mutexes[device_id].unlock();
+            io_mutex[io_id].unlock();
 
             int cpu_id = temp.first;
             Task *task = temp.second;
@@ -84,10 +81,8 @@ void *IO_device(void *arg){
             
             auto job_type = task->bursts.front();
             int duration = job_type.second;
-            //safe_cerr("I/O do tid=" + to_string(task->task_id) + " in I/O #" + to_string(io_id) + "\n");
             logger.write("IO", io_id, task->task_id, "ENTER_IO");
             if (duration <= 0) throw runtime_error("duration time error in IO_device");
-            //usleep(duration);
             busy_sleep_microseconds(duration);
             task->bursts.pop();
             logger.write("IO", io_id, task->task_id, "LEAVE_IO");//, to_string(duration));
@@ -97,16 +92,14 @@ void *IO_device(void *arg){
                 safe_cerr("IO_device: invalid cpu_id returned: " + to_string(cpu_id) + "\n");
                 continue;
             }
-            //pthread_mutex_lock(&mutexes[cpu_id]);
-            mutexes[cpu_id].lock();
+            ret_mutex[cpu_id].lock();
             tasks_return_from_io[cpu_id].push(task);
-            //pthread_mutex_unlock(&mutexes[cpu_id]);
-            mutexes[cpu_id].unlock();
+            ret_mutex[cpu_id].unlock();
         } else {
-            //pthread_mutex_unlock(&mutexes[device_id]);
-            mutexes[device_id].unlock();
+            io_running[io_id].store(false);
+            io_mutex[io_id].unlock();
 
-            // check shutdown condition: all CPUs not running?
+            // check shutdown condition: 
             bool all_not_running = true;
             for (int i = 0; i < NUM_CPU; ++i){
                 all_not_running &= !cpu_state[i];
@@ -116,7 +109,6 @@ void *IO_device(void *arg){
                 safe_cerr("Shut down I/O #" + to_string(io_id) + "\n");
                 break;
             }
-            //sleep(1);
             busy_sleep_microseconds(10000);
         }
     }
@@ -142,20 +134,17 @@ void *processor(void *arg){
     int count = 0;
     cpu_state[cpu_id] = true;
 
-    //pthread_mutex_lock(&mutexes[cpu_id]);
-    mutexes[cpu_id].lock();
+    //sched_mutex2.lock();
     sched->read_next_n_tasks(workload_factor1, cpu_id, logger);
-    //pthread_mutex_unlock(&mutexes[cpu_id]);
-    mutexes[cpu_id].unlock();
+    //sched_mutex2.unlock();
+
     while (true){
         // drain returned tasks safely under lock
-        //pthread_mutex_lock(&mutexes[cpu_id]);
-        mutexes[cpu_id].lock();
+        ret_mutex[cpu_id].lock();
         while (!tasks_return_from_io[cpu_id].empty()){
             Task *ret_task = tasks_return_from_io[cpu_id].front();
             tasks_return_from_io[cpu_id].pop();
-            //pthread_mutex_unlock(&mutexes[cpu_id]);
-            mutexes[cpu_id].unlock();
+            ret_mutex[cpu_id].unlock();
 
             if (!ret_task){
                 safe_cerr("processor: null ret_task\n");
@@ -168,11 +157,9 @@ void *processor(void *arg){
                 delete ret_task;
             }
 
-            //pthread_mutex_lock(&mutexes[cpu_id]);
-            mutexes[cpu_id].lock();
+            ret_mutex[cpu_id].lock();
         }
-        //pthread_mutex_unlock(&mutexes[cpu_id]);
-        mutexes[cpu_id].unlock();
+        ret_mutex[cpu_id].unlock();
 
         // request a task from scheduler
         auto start = chrono::steady_clock::now();
@@ -184,33 +171,23 @@ void *processor(void *arg){
 
             // check IO queues and returned task queues under proper locks
             bool all_io_empty = true;
-            for (int i = IO_ID_OFFSET; i < IO_ID_OFFSET + NUM_IO; ++i){
-                //pthread_mutex_lock(&mutexes[i]);
-                mutexes[i].lock();
+            for (int i = 0; i < NUM_IO; ++i){
+                io_mutex[i].lock();
                 all_io_empty &= io_queue[i].empty();
-                //pthread_mutex_unlock(&mutexes[i]);
-                mutexes[i].unlock();
+                io_mutex[i].unlock();
             }
 
             bool all_ret_empty = true;
             for (int i = 0; i < NUM_CPU; ++i){
-                //pthread_mutex_lock(&mutexes[i]);
-                mutexes[i].lock();
+                ret_mutex[i].lock();
                 all_ret_empty &= tasks_return_from_io[i].empty();
-                //pthread_mutex_unlock(&mutexes[i]);
-                mutexes[i].unlock();
+                ret_mutex[i].unlock();
             }
 
             // check if all IO mutexes are unlocked by trying to lock them
             bool any_io_busy = false;
-            for (int i = IO_ID_OFFSET; i < IO_ID_OFFSET + NUM_IO; ++i){
-                //int ret = pthread_mutex_trylock(&mutexes[i]);                
-                if (mutexes[i].try_lock()){
-                    //pthread_mutex_unlock(&mutexes[i]);
-                    mutexes[i].unlock();
-                } else {
-                    any_io_busy = true; // locked by IO thread or busy
-                }
+            for (int i = 0; i < NUM_IO; ++i){
+                any_io_busy &= io_running[i];
             }
 
             if (all_io_empty && !any_io_busy && all_ret_empty){
@@ -224,7 +201,6 @@ void *processor(void *arg){
                 break;
             }
             busy_sleep_microseconds(10000);
-            //sleep(1);
             continue;
         }
 
@@ -269,19 +245,15 @@ void *processor(void *arg){
 
         if (device_id >= IO_ID_OFFSET){
             int io_id = device_id - IO_ID_OFFSET;
-            // enqueue to io queue under io mutex
-            //pthread_mutex_lock(&mutexes[device_id]);
-            mutexes[device_id].lock();
+            io_mutex[io_id].lock();
             io_queue[io_id].push({cpu_id, task});
-            //pthread_mutex_unlock(&mutexes[device_id]); //
-            mutexes[device_id].unlock();
+            io_mutex[io_id].unlock();
         } else {
             // more cpu time - return to scheduler
             sched->return_task(cpu_id, task);
             logger.write("CPU", cpu_id, task->task_id, "ENTER_SCHED");
         }
-        
-        //busy_sleep_microseconds(10000);
+
     }
     std::cerr << "Total scheduling time for CPU #" << cpu_id << ": "<< total_elapsed.count() << endl
               << "count = " << count << endl;
