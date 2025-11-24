@@ -11,20 +11,20 @@
 #include <iostream>
 #include <utility>
 #include <bitset>
+#include <mutex>
 using namespace std;
 
 
 class Scheduler_O1 : public Scheduler{
     
     ifstream infile;
+    mutex sched_mutex;
     struct PriorityQueue{
     private:
-        int min_prio;
-        int max_prio;
         vector<queue<Task*>> pq;
         int len;
     public:
-        PriorityQueue(int min_prio, int max_prio);
+        PriorityQueue();
         void insert(Task* task);
         Task* get();
         bool empty() const;
@@ -34,7 +34,7 @@ class Scheduler_O1 : public Scheduler{
     };
     
     struct Runqueue{
-        PriorityQueue realtime_pq, active_pq, expired_pq;
+        PriorityQueue active_pq, expired_pq;
         Runqueue();
         int size() const;
     };

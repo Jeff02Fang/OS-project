@@ -7,6 +7,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <string>
 #include "Scheduler_On.hpp"
 #include "Scheduler_O1.hpp"
 #include "ThreadUtils.hpp"
@@ -20,19 +21,18 @@ int workload_factor1;
 int workload_factor2;
 
 int NUM_CPU = 0;
-vector<bool> cpu_state;
-queue<Task*> *tasks_return_from_io = nullptr;
+const int MAX_NUM_CPU = 4;
+atomic<bool> cpu_state[MAX_NUM_CPU];
+queue<Task*> tasks_return_from_io[MAX_NUM_CPU];
 
 const int NUM_IO = 2;
 const int IO_ID_OFFSET = 4;      // device ids for IO start here (4,5,...)
-//const int NUM_DEVICES = 8;       // total devices (cpus + possible ios)
 queue<pair<int, Task*>> io_queue[NUM_IO];
 
 //mutex mutexes[NUM_DEVICES];
 mutex cerr_mutex;
 mutex io_mutex[NUM_IO];
 mutex ret_mutex[4];
-mutex sched_mutex;
 atomic<bool> io_running[NUM_IO];
 atomic<bool> shut_down(false);
 
@@ -49,7 +49,7 @@ void safe_cerr(const string &s){
 void *IO_device(void *arg){
     int device_id = *((int*)arg);
     int io_id = device_id - IO_ID_OFFSET;
-    safe_cerr("Turn on I/O #" + to_string(io_id) + "\n");
+    //safe_cerr("Turn on I/O #" + to_string(io_id) + "\n");
     set_realtime_and_affinity(io_id+IO_ID_OFFSET, 76-io_id);
     // init Logger
     Logger logger("io" + to_string(io_id) + ".log", global_start_time);
@@ -84,7 +84,7 @@ void *IO_device(void *arg){
             logger.write("IO", io_id, task->task_id, "ENTER_IO");
             if (duration <= 0) throw runtime_error("duration time error in IO_device");
             busy_sleep_microseconds(duration);
-            task->bursts.pop();
+            task->bursts.pop_back();
             logger.write("IO", io_id, task->task_id, "LEAVE_IO");//, to_string(duration));
 
             // return to CPU queue: lock that cpu's queue mutex
@@ -96,24 +96,23 @@ void *IO_device(void *arg){
             tasks_return_from_io[cpu_id].push(task);
             ret_mutex[cpu_id].unlock();
         } else {
-            io_running[io_id].store(false);
             io_mutex[io_id].unlock();
+            io_running[io_id].store(false);
 
             // check shutdown condition: 
             bool all_not_running = true;
             for (int i = 0; i < NUM_CPU; ++i){
-                all_not_running &= !cpu_state[i];
+                all_not_running &= !cpu_state[i].load();
             }
             if (all_not_running){
                 shut_down.store(true);
-                safe_cerr("Shut down I/O #" + to_string(io_id) + "\n");
+                //safe_cerr("Shut down I/O #" + to_string(io_id) + "\n");
                 break;
             }
-            busy_sleep_microseconds(10000);
         }
     }
 
-    pthread_exit(NULL);
+    pthread_exit(nullptr);
     return nullptr;
 }
 
@@ -122,7 +121,7 @@ void *processor(void *arg){
     pair<int*, Scheduler*> *cpu_param = (pair<int*, Scheduler*>*)arg;
     int cpu_id = *cpu_param->first;
     Scheduler *sched = cpu_param->second;
-    safe_cerr("Turn on CPU #" + to_string(cpu_id) + "\n");
+    //safe_cerr("Turn on CPU #" + to_string(cpu_id) + "\n");
 
     set_realtime_and_affinity(cpu_id, 80-cpu_id);
     // init Logger
@@ -132,11 +131,9 @@ void *processor(void *arg){
 
     std::chrono::microseconds total_elapsed{0};
     int count = 0;
-    cpu_state[cpu_id] = true;
-
-    //sched_mutex2.lock();
+    cpu_state[cpu_id].store(true);
+    // preload n tasks to create a stable workload
     sched->read_next_n_tasks(workload_factor1, cpu_id, logger);
-    //sched_mutex2.unlock();
 
     while (true){
         // drain returned tasks safely under lock
@@ -148,7 +145,7 @@ void *processor(void *arg){
 
             if (!ret_task){
                 safe_cerr("processor: null ret_task\n");
-            } else if (!ret_task->bursts.empty()){
+            } else if (!(ret_task->bursts.empty())){
                 sched->return_task(cpu_id, ret_task);
                 logger.write("CPU", cpu_id, ret_task->task_id, "ENTER_SCHED");
             } else {
@@ -167,7 +164,7 @@ void *processor(void *arg){
         auto finish = chrono::steady_clock::now();
         total_elapsed += std::chrono::duration_cast<std::chrono::microseconds>(finish - start);
         count += 1;
-        if (task == nullptr){
+        if (!task){
 
             // check IO queues and returned task queues under proper locks
             bool all_io_empty = true;
@@ -184,30 +181,29 @@ void *processor(void *arg){
                 ret_mutex[i].unlock();
             }
 
-            // check if all IO mutexes are unlocked by trying to lock them
+            // check if any IO is still working
             bool any_io_busy = false;
             for (int i = 0; i < NUM_IO; ++i){
                 any_io_busy &= io_running[i];
             }
 
             if (all_io_empty && !any_io_busy && all_ret_empty){
-                cpu_state[cpu_id] = false; // tell IOs this cpu is idle
+                cpu_state[cpu_id].store(false); // tell IOs this cpu is idle
             } else {
-                cpu_state[cpu_id] = true;
+                cpu_state[cpu_id].store(true);
             }
 
             if (shut_down.load()){
-                safe_cerr("Shut down cpu #" + to_string(cpu_id) + "\n");
+                //safe_cerr("Shut down cpu #" + to_string(cpu_id) + "\n");
                 break;
             }
-            busy_sleep_microseconds(10000);
             continue;
         }
 
         if (task->bursts.empty()){
-            cerr << "no time " << task->task_id << endl;
-            continue;
-            //throw runtime_error("no task duration time in processor");
+            //cerr << "no time " << task->task_id << endl;
+            //continue;
+            throw runtime_error("no task duration time in processor");
         }
         auto job_type = task->bursts.front();
         int device_id = job_type.first;
@@ -220,11 +216,11 @@ void *processor(void *arg){
             //logger.write("CPU", cpu_id, task->task_id, "ENTER_CPU");
 
             if (duration <= 0){
-                continue;
-                //throw runtime_error("duration time error in processor");
+                //continue;
+                throw runtime_error("duration time error in processor");
             }
             busy_sleep_microseconds(duration);
-            task->bursts.pop();
+            task->bursts.pop_back();
 
             if (task->bursts.empty()){
                 logger.write("CPU", cpu_id, task->task_id, "FINISH_CPU", to_string(duration));
@@ -234,6 +230,7 @@ void *processor(void *arg){
             run = true;
             //logger.write("CPU", cpu_id, task->task_id, "LEAVE_CPU", to_string(duration));
         }
+        // Finish CPU burst
         if (run)
             logger.write("CPU", cpu_id, task->task_id, "LEAVE_CPU", to_string(duration));
         else
@@ -255,10 +252,10 @@ void *processor(void *arg){
         }
 
     }
-    std::cerr << "Total scheduling time for CPU #" << cpu_id << ": "<< total_elapsed.count() << endl
-              << "count = " << count << endl;
-
-    pthread_exit(NULL);
+    cpu_state[cpu_id].store(false);
+    string message = "Total scheduling time for CPU #"+to_string(cpu_id) + ": "+to_string(total_elapsed.count())+", count = "+to_string(count)+"\n";
+    safe_cerr(message);
+    pthread_exit(nullptr);
     return nullptr;
 }
 
@@ -268,7 +265,7 @@ void *processor(void *arg){
 // -------------------- main --------------------
 int main(int argc, char *argv[]){
     if (argc < 4){
-        cerr << "Usage: " << argv[0] << " <num_cpu (1-4)> <inputfile> <sched_algo (n/1)\n";
+        cerr << "Usage: " << argv[0] << " <num_cpu (1-4)> <inputfile> <sched_algo (On/O1)\n";
         return 1;
     }
 
@@ -281,25 +278,11 @@ int main(int argc, char *argv[]){
 
     string filename = argv[2];
     string sched_algo = argv[3];
-    workload_factor1 = (argc > 4 ? stoi(argv[4]) : 10);
+    workload_factor1 = (argc > 4 ? stoi(argv[4]) : 16);
     workload_factor2 = (argc > 5 ? stoi(argv[5]) : 1);
-    cerr << "factor1 (#tasks in ready queue before sys starts): " << workload_factor1 << endl;
-    cerr << "factor2 (#tasks be added after each cpu request): " << workload_factor2 << endl;
+    cerr << "Total #tasks in ready queue(s): " << workload_factor1 << endl;
+    //cerr << "factor2 (#tasks be added after each cpu request): " << workload_factor2 << endl;
     
-
-    // init shared state
-    cpu_state = vector<bool>(NUM_CPU, true);
-    tasks_return_from_io = new queue<Task*>[NUM_CPU];
-
-    // init mutexes
-    /*
-    for (int i = 0; i < NUM_DEVICES; ++i){
-        if (pthread_mutex_init(&mutexes[i], nullptr) != 0){
-            cerr << "Failed to init mutex " << i << "\n";
-            return 1;
-        }
-    }*/
-
     // init scheduler
     Scheduler *sched;
     if (sched_algo == "On"){
@@ -309,7 +292,7 @@ int main(int argc, char *argv[]){
         sched = new Scheduler_O1(filename, NUM_CPU);
     }
     else{
-        cerr << "choose scheduler algorithm (n/1)";
+        cerr << "choose scheduler algorithm (On/O1)";
         return 1;
     }
 
@@ -362,10 +345,9 @@ int main(int argc, char *argv[]){
     for (auto p : cpu_ids) delete p;
     for (auto p : cpu_params) delete p;
 
-    delete[] tasks_return_from_io;
     delete sched;
 
-    safe_cerr("Program exiting cleanly\n");
+    //safe_cerr("Program exiting cleanly\n");
     return 0;
 }
 

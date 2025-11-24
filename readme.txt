@@ -1,5 +1,5 @@
 executing format:
-./main <num_cpu> <filename> <sched_algo> <workload_f1> < workload_f2>
+./main <num_cpu> <filename> <sched_algo> <workload_factor> 
 sort -n -k1 cpu*.log io*.log > merged.log
 python3 metrics.py
 
@@ -18,10 +18,9 @@ executing instructions:
 0.
     make
 1. 
-    sudo time ./main 2 tasks/task5.txt n 10 10
+    sudo time ./main 4 tasks/task512.txt On 32
 2. 
     make merge
-3.
     python3 metrics.py 
 
 

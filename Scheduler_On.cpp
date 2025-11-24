@@ -4,15 +4,11 @@
 #include <iostream>
 #include <time.h>
 #include <stdexcept>
-#include <mutex>
 using namespace std;
 
 extern int NUM_CPU;
 extern int workload_factor1;
 extern int workload_factor2;
-
-mutex sched_req_mutex, sched_ret_mutex;
-extern mutex sched_mutex;
 
 Scheduler_On::Scheduler_On(string filename){
     if (!open_task_file(filename)){
@@ -20,14 +16,24 @@ Scheduler_On::Scheduler_On(string filename){
     }
 }
 
+Scheduler_On::~Scheduler_On(){
+    rq_mutex.lock();
+    while (!ready_queue.empty()){
+        Task *task = ready_queue.front();
+        ready_queue.pop_front();
+        delete task;
+    }
+    rq_mutex.unlock();
+}
+
 Task* Scheduler_On::request_task(int cpu_id, Logger &logger){
-    sched_req_mutex.lock();
+    rq_mutex.lock();
     if ((int)ready_queue.size() < workload_factor1) 
         read_next_n_tasks(workload_factor2, cpu_id, logger);
 
 
     if (ready_queue.empty()){
-        sched_req_mutex.unlock();
+        rq_mutex.unlock();
         return nullptr;
     }
     pair<int, Task*> best_choice(-2000, nullptr);
@@ -41,15 +47,15 @@ Task* Scheduler_On::request_task(int cpu_id, Logger &logger){
     }
     ready_queue.remove(best_choice.second);
 
-    sched_req_mutex.unlock();
+    rq_mutex.unlock();
     return best_choice.second;
 }
 
 void Scheduler_On::return_task(int cpu_id, Task *task){
     cpu_id += 1; // prevent warning
-    sched_ret_mutex.lock();
+    rq_mutex.lock();
     ready_queue.push_back(task);
-    sched_ret_mutex.unlock();
+    rq_mutex.unlock();
 }
 
 int Scheduler_On::goodness(const int cpu_id, const Task *task) const {
@@ -80,9 +86,9 @@ bool Scheduler_On::open_task_file(const string &filename){
 }
 
 void Scheduler_On::read_next_n_tasks(int n, int cpu_id, Logger &logger){
-    sched_mutex.lock();
+    rq_mutex.lock();
     if (!infile.is_open()){
-        sched_mutex.unlock();
+        rq_mutex.unlock();
         return;
     }
     string line;
@@ -93,10 +99,10 @@ void Scheduler_On::read_next_n_tasks(int n, int cpu_id, Logger &logger){
         int task_id, rt_priority, nice, policy;
         iss >> task_id >> rt_priority >> nice >> policy;
 
-        queue<pair<int, int>> bursts;
+        vector<pair<int, int>> bursts;
         int device_id, duration;
         while (iss >> device_id >> duration){
-            bursts.push(make_pair(device_id, duration));
+            bursts.push_back(pair<int, int>(device_id, duration));
             //cerr << task_id << " " << duration << endl;
         }
 
@@ -109,5 +115,5 @@ void Scheduler_On::read_next_n_tasks(int n, int cpu_id, Logger &logger){
     if (infile.eof()){
         infile.close();
     }
-    sched_mutex.unlock();
+    rq_mutex.unlock();
 }
